@@ -1,0 +1,369 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2024 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+#include "main.h"
+#include "i2c.h"
+#include "gpio.h"
+// IC CD4094
+#define LATCH_PIN GPIO_PIN_8
+#define DATA_PIN GPIO_PIN_9
+#define CLOCK_PIN GPIO_PIN_8
+// DS1307
+#define DS1307_I2C_ADDR     0x68
+#define DS1307_REG_SECOND     0x00
+#define DS1307_REG_MINUTE     0x01
+#define DS1307_REG_HOUR      0x02
+#define DS1307_REG_DOW        0x03
+#define DS1307_REG_DATE       0x04
+#define DS1307_REG_MONTH      0x05
+#define DS1307_REG_YEAR       0x06
+#define DS1307_REG_CONTROL     0x07
+#define DS1307_REG_UTC_HR    0x08
+#define DS1307_REG_UTC_MIN    0x09
+#define DS1307_REG_CENT        0x10
+#define DS1307_TIMEOUT        1000
+// PT2272-M4
+#define D0_PIN GPIO_PIN_5
+#define D1_PIN GPIO_PIN_4
+#define D2_PIN GPIO_PIN_3
+#define D3_PIN GPIO_PIN_0
+// Remote
+#define key_1 0x0001
+#define key_2 0x0010
+#define key_3 0x0011
+#define key_4 0x0100
+#define key_5 0x0010
+#define key_6 0x0101
+#define key_7 0x0110
+#define key_8 0x1000
+#define key_9 0x1001
+#define key_10 0x1010
+#define key_11 0x1011
+#define key_12 0x1100
+
+typedef struct {
+    uint8_t sec;
+    uint8_t min;
+    uint8_t hour;
+    uint8_t dow;
+    uint8_t date;
+    uint8_t month;
+    uint16_t year;
+} DS1307_STRUCT;
+DS1307_STRUCT ds1307;
+uint8_t DS1307_DecodeBCD(uint8_t bin);
+uint8_t DS1307_EncodeBCD(uint8_t dec);
+void DS1307_SetClockHalt(uint8_t halt);
+void DS1307_SetRegByte(uint8_t regAddr, uint8_t val);
+void DS1307_SetTimeZone(int8_t hr, uint8_t min);
+uint8_t DS1307_GetClockHalt(void);
+uint8_t DS1307_GetRegByte(uint8_t regAddr);
+void DS1307_config();
+void DS1307_gettime();
+void DS1307_settime(uint8_t sec,uint8_t in,uint8_t hour_24mode,uint8_t dayOfWeek,uint8_t date,uint8_t month, uint16_t year);
+void SystemClock_Config(void);
+void send_data_to_cd4094(uint8_t data);
+void send_out_led(uint8_t data1, uint8_t data2, uint8_t data3, uint8_t data4);
+void display_time_on_7seg(uint8_t hour, uint8_t min, uint8_t sec);
+void display_date_on_7seg(uint8_t date, uint8_t month, uint16_t year);
+void uint8_t read_data_from_remote(void) 
+int main(void)
+{
+  HAL_Init();
+  /* Configure the system clock */
+  SystemClock_Config();
+  MX_GPIO_Init();
+  MX_I2C1_Init();
+  DS1307_config();
+  DS1307_settime(30, 14, 59, 3, 9, 4, 2024);
+  while (1)
+  {    
+       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_SET); 
+       HAL_Delay(100);
+       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET); 
+       HAL_Delay(100);
+       DS1307_gettime();
+       display_time_on_7seg(ds1307.hour, ds1307.min, ds1307.sec);
+       //display_date_on_7seg(ds1307.date, ds1307.month, ds1307.year);
+       HAL_Delay(1);
+  }
+}
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI_DIV2;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+void DS1307_gettime(){
+    uint16_t cen;
+    ds1307.sec=DS1307_DecodeBCD(DS1307_GetRegByte(DS1307_REG_SECOND) & 0x7f);
+    ds1307.min=DS1307_DecodeBCD(DS1307_GetRegByte(DS1307_REG_MINUTE));
+    ds1307.hour=DS1307_DecodeBCD(DS1307_GetRegByte(DS1307_REG_HOUR) & 0x3f);
+    ds1307.dow=DS1307_DecodeBCD(DS1307_GetRegByte(DS1307_REG_DOW));
+    ds1307.date=DS1307_DecodeBCD(DS1307_GetRegByte(DS1307_REG_DATE));
+    ds1307.month=DS1307_DecodeBCD(DS1307_GetRegByte(DS1307_REG_MONTH));
+    cen = DS1307_GetRegByte(DS1307_REG_CENT) * 100;
+    ds1307.year=DS1307_DecodeBCD(DS1307_GetRegByte(DS1307_REG_YEAR)) + cen;
+}
+void DS1307_SetRegByte(uint8_t regAddr, uint8_t val) {
+    uint8_t bytes[2] = { regAddr, val };
+    if(HAL_I2C_Master_Transmit(&hi2c1, DS1307_I2C_ADDR << 1, bytes, 2, DS1307_TIMEOUT) != HAL_OK)
+    {
+      Error_Handler();
+    }
+}
+uint8_t DS1307_GetClockHalt(void) {
+    return (DS1307_GetRegByte(DS1307_REG_SECOND) & 0x80) >> 7;
+}
+void DS1307_settime(uint8_t sec,uint8_t min,uint8_t hour_24mode,uint8_t dayOfWeek,uint8_t date,uint8_t month, uint16_t year){
+    DS1307_SetRegByte(DS1307_REG_SECOND, DS1307_EncodeBCD(sec | DS1307_GetClockHalt()));
+    DS1307_SetRegByte(DS1307_REG_MINUTE, DS1307_EncodeBCD(min));
+    DS1307_SetRegByte(DS1307_REG_HOUR, DS1307_EncodeBCD(hour_24mode & 0x3f));//hour_24mode Hour in 24h format, 0 to 23.
+    DS1307_SetRegByte(DS1307_REG_DOW, DS1307_EncodeBCD(dayOfWeek));//dayOfWeek Days since last Sunday, 0 to 6.
+    DS1307_SetRegByte(DS1307_REG_DATE, DS1307_EncodeBCD(date));//date Day of month, 1 to 31.
+    DS1307_SetRegByte(DS1307_REG_MONTH, DS1307_EncodeBCD(month));//month Month, 1 to 12.
+    DS1307_SetRegByte(DS1307_REG_CENT, year / 100);
+    DS1307_SetRegByte(DS1307_REG_YEAR, DS1307_EncodeBCD(year % 100));//2000 to 2099.
+}
+uint8_t DS1307_GetRegByte(uint8_t regAddr) {
+    uint8_t val;
+    HAL_I2C_Master_Transmit(&hi2c1, DS1307_I2C_ADDR << 1, &regAddr, 1, DS1307_TIMEOUT);
+    HAL_I2C_Master_Receive(&hi2c1, DS1307_I2C_ADDR << 1, &val, 1, DS1307_TIMEOUT);
+    return val;
+}
+void DS1307_SetClockHalt(uint8_t halt) {
+    uint8_t ch = (halt ? 1 << 7 : 0);
+    DS1307_SetRegByte(DS1307_REG_SECOND, ch | (DS1307_GetRegByte(DS1307_REG_SECOND) & 0x7f));
+}
+void DS1307_SetTimeZone(int8_t hr, uint8_t min) {
+    DS1307_SetRegByte(DS1307_REG_UTC_HR, hr);
+    DS1307_SetRegByte(DS1307_REG_UTC_MIN, min);
+}
+void DS1307_config(){
+    DS1307_SetClockHalt(0);
+    DS1307_SetTimeZone(+8, 00);
+}
+uint8_t DS1307_DecodeBCD(uint8_t bin) {
+    return (((bin & 0xf0) >> 4) * 10) + (bin & 0x0f);
+}
+uint8_t DS1307_EncodeBCD(uint8_t dec) {
+    return (dec % 10 + ((dec / 10) << 4));
+}
+const unsigned int seven_segmenta[] = {
+    0xc0, // 0
+    0xf9, // 1
+    0xa4, // 2
+    0xb0, // 3
+    0x99, // 4
+    0x92, // 5
+    0x82, // 6
+    0x8f, // 7
+    0x80, // 8
+    0x90  // 9
+};
+void send_data_to_cd4094(uint8_t data) {
+    for (int i = 0; i < 8; i++) {
+        HAL_GPIO_WritePin(GPIOC, DATA_PIN, (data & 0x80) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOC, CLOCK_PIN, GPIO_PIN_SET); HAL_Delay(1); 
+        HAL_GPIO_WritePin(GPIOC, CLOCK_PIN, GPIO_PIN_RESET); HAL_Delay(1);
+        data = data << 1;
+    }
+}
+void send_out_led(uint8_t data1, uint8_t data2, uint8_t data3, uint8_t  data4) {
+    send_data_to_cd4094(data1);
+    send_data_to_cd4094(data2);
+    send_data_to_cd4094(data3);
+    send_data_to_cd4094(data4);
+    HAL_GPIO_WritePin(GPIOA, LATCH_PIN, GPIO_PIN_SET);
+    HAL_Delay(1);
+    HAL_GPIO_WritePin(GPIOA, LATCH_PIN, GPIO_PIN_RESET);
+    HAL_Delay(1);
+}
+void display_time_on_7seg(uint8_t hour, uint8_t min, uint8_t sec)
+{   
+    uint8_t led1, led2, led3, led4;
+    led1= seven_segmenta[hour/10];
+    HAL_Delay(1);
+    led2 = seven_segmenta[hour%10];
+    HAL_Delay(1);
+    led3 = seven_segmenta[min/10];
+    HAL_Delay(1);
+    led4 = seven_segmenta[min%10];
+    HAL_Delay(1);
+    send_out_led(led1, led2, led3, led4);
+}
+void display_date_on_7seg(uint8_t date, uint8_t month, uint16_t year) {
+    uint8_t led5, led6, led7, led8;
+    led5 = seven_segmenta[(date / 10) % 10]; // Tens of date
+    led6 = seven_segmenta[date % 10];       // Units of date
+    led7 = seven_segmenta[(month / 10) % 10]; // Tens of month
+    led8 = seven_segmenta[month % 10];       // Units of month
+    
+    // Send data to CD4094 to display
+    send_out_led(led5, led6, led7, led8);
+}
+uint8_t read_data_from_remote(void) {
+    uint8_t data = 0;
+    if (HAL_GPIO_ReadPin(GPIOB, D0_PIN) == GPIO_PIN_SET) {
+        data |= (1 << 0);
+    }
+    if (HAL_GPIO_ReadPin(GPIOB, D1_PIN) == GPIO_PIN_SET) {
+        data |= (1 << 1);
+    }
+    if (HAL_GPIO_ReadPin(GPIOB, D2_PIN) == GPIO_PIN_SET) {
+        data |= (1 << 2);
+    }
+    if (HAL_GPIO_ReadPin(GPIOA, D3_PIN) == GPIO_PIN_SET) {
+        data |= (1 << 3);
+    }
+
+    return data;
+}
+void handle_remote(void)
+{
+     uint8_t data = read_data_from_remote();
+     if(data)
+     {
+     switch(data)
+     case key_1:
+       handle_button_1();
+       break;
+     case key_2:
+       handle_button_2();
+       break;
+     case key_3:
+       handle_button_3();
+       break;
+     case key_4:
+       handle_button_4();
+       break;
+     case key_5:
+       handle_button_5();
+       break;
+     case key_6:
+       handle_button_6();
+       break;
+     case key_7:
+       handle_button_7();
+       break;
+     case key_8:
+       handle_button_8();
+       break;
+      case key_9:
+       handle_button_9();
+       break;
+     case key_10:
+       handle_button_10();
+       break;
+     case key_11:
+       handle_button_11();
+       break;
+     case key_12:
+       handle_button_12();
+       break;
+     default:
+       break; 
+     }
+       
+}
+void handle_button_1(void)
+{
+  
+}
+void handle_button_2(void)
+{
+  
+}
+void handle_button_3(void)
+{
+  
+}
+void handle_button_4(void)
+{
+  
+}
+void handle_button_5(void)
+{
+  
+}
+void handle_button_6(void)
+{
+  
+}
+void handle_button_7(void)
+{
+  
+}
+void handle_button_8(void)
+{
+  
+}
+void handle_button_9(void)
+{
+  
+}
+void handle_button_10(void)
+{
+  
+}
+void handle_button_11(void)
+{
+  
+}
+void handle_button_12(void)
+{
+  
+}
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1)
+  {
+  }
+}
+#ifdef  USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+}
+#endif /* USE_FULL_ASSERT */
